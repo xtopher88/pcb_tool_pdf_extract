@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "schematic-extract"
+version = "0.1.0"
+description = "Extract structured component profiles from IC datasheet PDFs for schematic review and firmware planning."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+dependencies = [
+  "PyMuPDF",
+  "PyYAML",
+  "python-dotenv",
+]
+
+[project.optional-dependencies]
+openai = ["openai"]
+claude = ["anthropic"]
+claude-code = ["claude-agent-sdk", "anyio"]
+docling = ["docling>=2.0"]
+all = ["openai", "anthropic", "claude-agent-sdk", "anyio", "docling>=2.0"]
+
+[project.scripts]
+schematic-extract = "schematic_extract.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
