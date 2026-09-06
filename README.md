@@ -118,6 +118,65 @@ Prompt caching is deliberately not used: the reusable prefix (system prompt +
 schema) is only ~5.4K tokens and each datasheet's excerpts are unique, so there
 is nothing meaningful to reuse across runs.
 
+## Provenance
+
+`source_sha256` identifies a PDF; without a URL it identifies a file nobody
+can find again. Step 1 captures where each PDF came from, with no change to
+how you download datasheets: every mainstream browser records the download
+location in an NTFS alternate data stream (`Zone.Identifier`) beside the
+file, and `extract-text` reads it automatically.
+
+Recorded into step-1 JSON and carried into each profile's `meta.json`:
+
+| Field | Source |
+|---|---|
+| `source_url` | `Zone.Identifier` (`HostUrl`, falling back to `ReferrerUrl`) |
+| `publisher` | host of that URL |
+| `retrieved` | file mtime — when the browser saved it |
+| `license` | always `proprietary-unverified` unless the sidecar says otherwise |
+| `url_source` | `manual` / `sidecar` / `zone-identifier` / `none` |
+| `url_note` | set when the URL needs a human look |
+
+Tracking parameters (`gclid`, `utm_*`, `_gl`, `ts`, …) are stripped by
+denylist, so meaningful ones — LCSC's `productCode`, Infineon's `folderId` —
+survive. Provenance is stored **outside** the hashed payload, so recording it
+never changes a `content_sha256`.
+
+**Harvest early.** The `Zone.Identifier` stream does not survive zip
+round-trips, FAT/exFAT drives, cloud-sync clients, or git. Run `extract-text`
+while the PDFs are still on the volume they were downloaded to.
+
+Precedence is `--source-url` > sidecar > `Zone.Identifier`:
+
+```bash
+schematic-extract extract-text foo.pdf --source-url https://vendor/foo.pdf
+schematic-extract backfill-provenance --dry-run   # preview
+schematic-extract backfill-provenance             # fill in older records
+```
+
+`backfill-provenance` matches PDFs to profiles by source hash, so renames on
+either side don't matter. Anything it can't resolve is printed as a pasteable
+`pdf_input/sources.yaml` block:
+
+```yaml
+sources:
+  <source_sha256>:
+    source_url: "https://vendor.example/datasheet.pdf"
+    license: proprietary-unverified
+```
+
+The sidecar is keyed by hash rather than filename for the same reason, and is
+the place to record a datasheet whose licence genuinely permits
+redistribution.
+
+### On `license`
+
+Datasheet licences are effectively never machine-readable and vendor PDFs are
+overwhelmingly all-rights-reserved, so every record defaults to
+`proprietary-unverified` — the restrictive assumption. The field exists to let
+a genuinely redistributable datasheet opt *in* via the sidecar, and to give
+the data repo's CI something to gate PDF redistribution on. Nothing infers it.
+
 ## Naming and re-runs
 
 Step 3 names its output after `component.part_number`. A part number must be a

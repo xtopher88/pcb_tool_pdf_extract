@@ -22,10 +22,14 @@ from .extract_profile import (
 from .hashing import content_sha256, file_sha256
 from .llm_client import EFFORT_CHOICES, first_text_block, make_client
 from .pdf_extract import extract_pdf_text, save_extracted_text
+from .provenance import SIDECAR_NAME, harvest, load_sidecar, sidecar_stub
 from .validate_profile import validate_profile
 
 _EXTRACTOR_CHOICES = ["pymupdf", "docling", "auto"]
 _BACKEND_CHOICES = ["openai", "claude", "claude-code"]
+# Written by step 1, copied into each profile's meta.json.
+_PROVENANCE_FIELDS = ("source_url", "publisher", "retrieved",
+                      "license", "url_source", "url_note")
 
 
 def _resolve_pdf(settings: Settings, pdf_name: str) -> Path:
@@ -41,14 +45,17 @@ def _resolve_pdf(settings: Settings, pdf_name: str) -> Path:
     )
 
 
-def cmd_extract_text(pdf_name: str, extractor: str = "pymupdf") -> None:
+def cmd_extract_text(pdf_name: str, extractor: str = "pymupdf",
+                     source_url: str | None = None) -> None:
     settings = Settings.load()
     ensure_dirs(settings)
 
     pdf_path = _resolve_pdf(settings, pdf_name)
     out_path = settings.step1_dir / f"{pdf_path.stem}.json"
 
-    data = extract_pdf_text(pdf_path, extractor=extractor)
+    data = extract_pdf_text(pdf_path, extractor=extractor,
+                            source_url=source_url,
+                            sidecar=load_sidecar(settings.input_dir))
     save_extracted_text(data, out_path)
     print(f"Wrote {out_path}")
 
@@ -170,6 +177,9 @@ def _write_profile(settings: Settings, stem: str, response_text: str,
         "effort": effort,
         "batch_api": via_batch,
         "date": date.today().isoformat(),
+        # Carried through from step 1 - the Zone.Identifier stream it came
+        # from may not exist by the time anyone reads this profile.
+        **{key: extracted.get(key) for key in _PROVENANCE_FIELDS},
     }
     meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
     print(f"Wrote {out_path}")
@@ -263,6 +273,93 @@ def _already_profiled(settings: Settings, pdf_path: Path,
     if (settings.output_dir / f"{pdf_path.stem}.yaml").is_file():
         return pdf_path.stem
     return None
+
+
+def cmd_backfill_provenance(dry_run: bool = False) -> int:
+    """Add source_url / retrieved / license to records written before
+    provenance was captured.
+
+    Matches PDFs to profiles by source hash, so it works regardless of how
+    either file has since been renamed. Run it while the source PDFs are
+    still on the NTFS volume they were downloaded to - the Zone.Identifier
+    stream is what makes the backfill possible, and copying the corpus
+    through a zip or a USB stick destroys it.
+    """
+    settings = Settings.load()
+    ensure_dirs(settings)
+    sidecar = load_sidecar(settings.input_dir)
+
+    # source_sha256 -> harvested provenance, from the PDFs we still have
+    by_hash: dict[str, tuple[Path, object]] = {}
+    for pdf_path in sorted(settings.input_dir.glob("*.pdf")):
+        digest = file_sha256(pdf_path)
+        by_hash[digest] = (pdf_path, harvest(pdf_path, digest, sidecar=sidecar))
+
+    updated, already, unresolved, orphaned = [], [], [], []
+
+    for meta_path in sorted(settings.output_dir.glob("*.meta.json")):
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"  skipped {meta_path.name}: {exc}")
+            continue
+
+        name = meta_path.name[: -len(".meta.json")]
+        digest = meta.get("source_sha256")
+        if not digest:
+            orphaned.append(f"{name} (no source_sha256 - predates hashing)")
+            continue
+        if meta.get("source_url"):
+            already.append(name)
+            continue
+        entry = by_hash.get(digest)
+        if entry is None:
+            orphaned.append(f"{name} (source PDF not in {settings.input_dir.name}/)")
+            continue
+
+        pdf_path, prov = entry
+        if not prov.resolved:
+            unresolved.append((digest, pdf_path.name, name))
+            continue
+
+        meta.update(prov.as_meta_fields())
+        if not dry_run:
+            meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+            _backfill_step1(settings, pdf_path.stem, prov)
+        updated.append(f"{name}  <-  {prov.source_url}")
+
+    verb = "would update" if dry_run else "updated"
+    print(f"\n-- provenance backfill{' (dry run)' if dry_run else ''} --")
+    print(f"  {verb}         : {len(updated)}")
+    print(f"  already had URL: {len(already)}")
+    print(f"  unresolved     : {len(unresolved)}")
+    print(f"  not matchable  : {len(orphaned)}")
+    for line in updated:
+        print(f"    + {line}")
+    for line in orphaned:
+        print(f"    ? {line}")
+
+    if unresolved:
+        print("\nNo URL recoverable for these - paste into "
+              f"{settings.input_dir / SIDECAR_NAME} and re-run:\n")
+        print(sidecar_stub([(d, f) for d, f, _ in unresolved]))
+    return 0
+
+
+def _backfill_step1(settings: Settings, stem: str, prov) -> None:
+    """Keep the step-1 record in step with the profile. Provenance lives
+    outside the hashed payload, so this leaves content_sha256 untouched."""
+    path = settings.step1_dir / f"{stem}.json"
+    if not path.is_file():
+        return
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    before = data.get("content_sha256")
+    data.update(prov.as_meta_fields())
+    assert data.get("content_sha256") == before, "provenance must not alter the content hash"
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
 def _summary(processed: list[str], skipped: list[str], failed: list[str]) -> None:
@@ -436,6 +533,9 @@ def main() -> None:
     p1.add_argument("pdf_name")
     p1.add_argument("--extractor", choices=_EXTRACTOR_CHOICES, default="pymupdf",
                     help="PDF extraction backend (default: pymupdf)")
+    p1.add_argument("--source-url",
+                    help="Where this PDF came from (overrides Zone.Identifier "
+                         f"and {SIDECAR_NAME})")
 
     p2 = sub.add_parser("chunk", help="Step 2: raw text -> heading-aware chunks (pdf_step1/chunks/)")
     p2.add_argument("pdf_name")
@@ -472,6 +572,12 @@ def main() -> None:
                     help="Skip the backend prompt")
     p6.add_argument("--model", help="Override the backend's default model")
 
+    p8 = sub.add_parser("backfill-provenance",
+                        help="Add source_url/retrieved/license to records written "
+                             "before provenance was captured")
+    p8.add_argument("--dry-run", action="store_true",
+                    help="Report what would change without writing")
+
     p7 = sub.add_parser("doctor", help="Check installation, directories, config, and key safety")
     p7.add_argument("--live", action="store_true",
                     help="Also make one tiny LLM request to verify the key works")
@@ -479,7 +585,8 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.cmd == "extract-text":
-        cmd_extract_text(args.pdf_name, extractor=args.extractor)
+        cmd_extract_text(args.pdf_name, extractor=args.extractor,
+                         source_url=args.source_url)
     elif args.cmd == "chunk":
         cmd_chunk(args.pdf_name)
     elif args.cmd == "profile":
@@ -493,6 +600,8 @@ def main() -> None:
     elif args.cmd == "setup":
         from .setup_env import cmd_setup
         cmd_setup(backend=args.backend, model=args.model)
+    elif args.cmd == "backfill-provenance":
+        raise SystemExit(cmd_backfill_provenance(dry_run=args.dry_run))
     elif args.cmd == "doctor":
         from .setup_env import cmd_doctor
         raise SystemExit(cmd_doctor(live=args.live))

@@ -8,6 +8,7 @@ import pymupdf  # package name: PyMuPDF
 
 from . import __version__
 from .hashing import content_sha256, file_sha256
+from .provenance import SIDECAR_NAME, harvest
 
 _AUTO_FALLBACK_THRESHOLD = 150  # total chars across all pages
 
@@ -24,7 +25,9 @@ def _total_chars(pages: list[dict]) -> int:
     return sum(len(p["text"]) for p in pages)
 
 
-def extract_pdf_text(pdf_path: Path, extractor: str = "pymupdf") -> dict:
+def extract_pdf_text(pdf_path: Path, extractor: str = "pymupdf", *,
+                     source_url: str | None = None,
+                     sidecar: dict[str, dict] | None = None) -> dict:
     """
     Extract PDF text using the specified backend.
 
@@ -32,6 +35,10 @@ def extract_pdf_text(pdf_path: Path, extractor: str = "pymupdf") -> dict:
       pymupdf  - fast text-layer extraction (default, works for most IC datasheets)
       docling  - OCR + table extraction for image-heavy or scanned PDFs
       auto     - try pymupdf first; fall back to docling if < 150 chars extracted
+
+    Provenance (where the PDF came from) is captured here because this is the
+    only step that touches the original file, and the Zone.Identifier stream
+    it reads does not survive being copied off NTFS.
     """
     source_hash = file_sha256(pdf_path)
     used = extractor
@@ -66,12 +73,23 @@ def extract_pdf_text(pdf_path: Path, extractor: str = "pymupdf") -> dict:
         "page_count": len(pages),
         "pages": pages,
     }
+    # Provenance sits outside the hashed payload, alongside the other
+    # acquisition metadata: it says where the bytes came from, not what they
+    # are, so recording it must not change an existing content hash.
+    prov = harvest(pdf_path, source_hash, source_url=source_url, sidecar=sidecar)
+    if not prov.resolved:
+        print(f"  [provenance] no source URL for {pdf_path.name} - "
+              f"pass --source-url or add it to {SIDECAR_NAME}")
+    elif prov.url_note:
+        print(f"  [provenance] {prov.source_url}  ({prov.url_note})")
+
     return {
         **payload,
         "content_sha256": content_sha256(payload),
         "extractor": used,
         "extractor_version": __version__,
         "extracted_date": date.today().isoformat(),
+        **prov.as_meta_fields(),
     }
 
 

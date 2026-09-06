@@ -8,7 +8,7 @@ An open source library that extracts structured data from schematic PDFs for
 circuit analysis and firmware planning, with a shared, collaboratively grown
 dataset of extraction outputs.
 
-## Status (updated 2026-09-05)
+## Status (updated 2026-09-06)
 
 **Done**
 
@@ -56,6 +56,20 @@ dataset of extraction outputs.
   instead of filename - the old check silently depended on Windows'
   case-insensitivity (`ads114s06b.pdf` vs `ADS114S06B.yaml`) and would have
   re-paid for those extractions on Linux/CI.
+- Provenance capture (`provenance.py`): `extract-text` harvests `source_url`,
+  `publisher` and `retrieved` from the NTFS `Zone.Identifier` stream the
+  browser writes at download time - no change to the manual download workflow,
+  and it works retroactively (15/17 of the seed corpus had a usable direct PDF
+  URL already recorded). Tracking parameters stripped by denylist so
+  meaningful ones survive. Precedence `--source-url` > `pdf_input/sources.yaml`
+  sidecar (keyed by source hash) > Zone.Identifier; `backfill-provenance
+  [--dry-run]` fills older records and prints a pasteable sidecar stub for
+  whatever it cannot resolve. Provenance is stored outside the hashed payload,
+  verified not to change any existing `content_sha256`. `license` is always
+  `proprietary-unverified` unless the sidecar overrides it - the restrictive
+  default, since datasheet licences are not machine-readable.
+  **Caveat: harvest early** - the stream does not survive zip, FAT/exFAT,
+  cloud sync, or git, which is why this runs at step 1 rather than on demand.
 - Onboarding & key management (`setup_env.py`): `schematic-extract setup`
   (interactive backend picker, hidden key input, writes `.env` only) and
   `schematic-extract doctor [--live]` (deps, dirs, config, key hygiene, and
@@ -223,7 +237,7 @@ the PR itself.
   URL schemes) make a general downloader its own project. Revisit only when
   the data repo needs a `fetch` script to rebuild a corpus from hash + URL, or
   if the server-side `workflow_dispatch` publish path is chosen.
-  Prerequisite, worth doing early: record `source_url` (+ `license`, retrieval
-  date) as provenance at `extract-text` time so a later fetcher has the data
-  it needs — the seed corpus's 12 PDF-less profiles show the cost of not
-  capturing it.
+  ~~Prerequisite, worth doing early: record `source_url` (+ `license`,
+  retrieval date) as provenance at `extract-text` time~~ — done 2026-09-06
+  via `provenance.py` (Zone.Identifier harvest + `sources.yaml` sidecar), so a
+  later fetcher now has hash + URL + retrieval date to work from.
