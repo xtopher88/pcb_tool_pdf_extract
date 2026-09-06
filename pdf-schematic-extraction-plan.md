@@ -8,7 +8,7 @@ An open source library that extracts structured data from schematic PDFs for
 circuit analysis and firmware planning, with a shared, collaboratively grown
 dataset of extraction outputs.
 
-## Status (updated 2026-09-03)
+## Status (updated 2026-09-05)
 
 **Done**
 
@@ -35,6 +35,27 @@ dataset of extraction outputs.
   formal JSON Schema is still an open item).
 - Smoke-tested on W25Q16JV: extract-text (77 pages) → chunk → validate all
   pass; outputs land in the directories above.
+- Batch API for step 3 (`batch_api.py`): with the `claude` backend, `batch`
+  submits every prepared datasheet as one Message Batch at 50% of standard
+  rates, then collects results. Steps 1-2 run locally first, so an image-only
+  PDF fails before anything is submitted. Submissions are recorded to
+  `pdf_output/.batches/<id>.json` before polling, so an interrupted poll is
+  resumable (`batch --resume <id>`); `--sync` keeps the sequential path, which
+  the non-Anthropic backends always take.
+- Cost knobs: `DATASHEET_EFFORT` / `--effort` (claude backend only, default
+  `high`); `max_tokens` raised 16000 -> 64000 after measuring that a produced
+  profile (ADS114S06B, ~15.6K output tokens) could exceed the old ceiling once
+  adaptive thinking shared the same budget. Prompt caching evaluated and
+  rejected: the reusable prefix is only ~5.4K tokens.
+- Profile naming resolved: step 3 names outputs after `component.part_number`
+  (single-token values only; prose like "Not specified in provided excerpts"
+  falls back to the source stem), so opaque downloads such as
+  `2d53d8d8...pdf` no longer produce anonymous profiles. Colliding part
+  numbers from different sources are suffixed with a short source hash rather
+  than overwritten. `batch` now decides what to skip by `source_sha256`
+  instead of filename - the old check silently depended on Windows'
+  case-insensitivity (`ads114s06b.pdf` vs `ADS114S06B.yaml`) and would have
+  re-paid for those extractions on Linux/CI.
 - Onboarding & key management (`setup_env.py`): `schematic-extract setup`
   (interactive backend picker, hidden key input, writes `.env` only) and
   `schematic-extract doctor [--live]` (deps, dirs, config, key hygiene, and
@@ -197,3 +218,12 @@ the PR itself.
 - Create the `schematic-extract-data` repo and implement `publish`
 - Seed `tests/fixtures/` with permissively licensed or self-made PDFs and
   golden outputs; wire up CI
+- **Deferred: automated PDF fetching.** The designer downloads datasheets by
+  hand during development, and vendor sites (login walls, JS gates, per-vendor
+  URL schemes) make a general downloader its own project. Revisit only when
+  the data repo needs a `fetch` script to rebuild a corpus from hash + URL, or
+  if the server-side `workflow_dispatch` publish path is chosen.
+  Prerequisite, worth doing early: record `source_url` (+ `license`, retrieval
+  date) as provenance at `extract-text` time so a later fetcher has the data
+  it needs — the seed corpus's 12 PDF-less profiles show the cost of not
+  capturing it.

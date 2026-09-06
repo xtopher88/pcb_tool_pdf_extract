@@ -18,6 +18,13 @@ pdf_step1/chunks/     chunked text JSON
 pdf_output/           component profile YAML + meta.json (hashes, versions)
 ```
 
+Profiles are named after the extracted `component.part_number`, not the input
+filename — so `2d53d8d8199c9dd6666d9bc9ac7c3a1e.pdf` becomes `TPS62843.yaml`.
+The part number is only known after the LLM has read the datasheet, so this
+happens in step 3; the original filename stays in `meta.json` (`source_file`).
+When no usable part number is extracted, the source filename is kept rather
+than invented — see [Naming and re-runs](#naming-and-re-runs).
+
 By default the three data directories are siblings of this repo
 (`../pdf_input`, `../pdf_step1`, `../pdf_output`). Override with the
 `PDF_WORKSPACE`, `PDF_INPUT_DIR`, `PDF_STEP1_DIR`, `PDF_OUTPUT_DIR`
@@ -110,6 +117,26 @@ Two knobs move the bill, in order of return:
 Prompt caching is deliberately not used: the reusable prefix (system prompt +
 schema) is only ~5.4K tokens and each datasheet's excerpts are unique, so there
 is nothing meaningful to reuse across runs.
+
+## Naming and re-runs
+
+Step 3 names its output after `component.part_number`. A part number must be a
+single token (`AMS1117`, `LP5907MFX-1.8`); anything containing whitespace is
+prose — usually the extractor correctly declining to guess — and the source
+filename is kept instead. Two different PDFs claiming the same part number do
+not overwrite each other: the second is suffixed with a short source hash and
+a warning is printed. Re-profiling the *same* PDF overwrites in place.
+
+Because output names no longer match input names, `batch` decides what to skip
+by **source hash** (`meta.json`'s `source_sha256`), not by filename. This also
+fixes a case-sensitivity trap: `ads114s06b.pdf` → `ADS114S06B.yaml` looked
+processed on Windows and unprocessed on Linux, silently paying for the same
+extraction twice in CI. Profiles predating source hashing still fall back to
+the old filename check.
+
+Renaming a profile by hand is safe — identity is the source hash, not the
+name. Nothing is ever deleted automatically; when a rename leaves an old file
+behind, the run says so and leaves it for you to remove.
 
 Configuration (managed by `schematic-extract setup`; env vars override `.env`):
 

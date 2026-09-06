@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -17,7 +19,7 @@ from .extract_profile import (
     prepare_user_prompt,
     select_relevant_chunks,
 )
-from .hashing import content_sha256
+from .hashing import content_sha256, file_sha256
 from .llm_client import EFFORT_CHOICES, first_text_block, make_client
 from .pdf_extract import extract_pdf_text, save_extracted_text
 from .validate_profile import validate_profile
@@ -86,20 +88,75 @@ def _prepare_request(settings: Settings, pdf_name: str) -> tuple[str, str, str]:
     return system_prompt, user_prompt, stem
 
 
+# A manufacturer part number is a single token. Anything with whitespace is
+# prose - typically the extractor correctly declining to guess ("Not specified
+# in provided excerpts") - and must not become a filename. Excluding the path
+# separators also keeps a model-supplied string from escaping the output dir.
+_PART_NUMBER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$")
+
+
+def _part_number_stem(profile: dict) -> str | None:
+    """The part number to name this profile's files after, or None."""
+    component = profile.get("component") if isinstance(profile, dict) else None
+    if not isinstance(component, dict):
+        return None
+    raw = component.get("part_number")
+    if not isinstance(raw, str):
+        return None
+    candidate = raw.strip().strip("\"'")
+    return candidate if _PART_NUMBER_RE.match(candidate) else None
+
+
+def _resolve_out_stem(settings: Settings, desired: str,
+                      source_sha256: str) -> str:
+    """Guard against two different datasheets claiming the same part number.
+
+    Re-profiling the same PDF overwrites in place; a genuine collision between
+    different sources is suffixed rather than silently clobbering the earlier
+    profile.
+    """
+    meta_path = settings.output_dir / f"{desired}.meta.json"
+    if not meta_path.is_file():
+        return desired
+    try:
+        existing = json.loads(meta_path.read_text(encoding="utf-8")).get("source_sha256")
+    except (OSError, json.JSONDecodeError):
+        return desired
+    if not existing or existing == source_sha256:
+        return desired
+    suffixed = f"{desired}__{source_sha256[:8]}"
+    print(f"  WARNING: {desired}.yaml already describes a different source PDF "
+          f"({existing[:8]}...); writing {suffixed}.yaml instead")
+    return suffixed
+
+
 def _write_profile(settings: Settings, stem: str, response_text: str,
                    backend: str, model: str, effort: str,
-                   via_batch: bool = False) -> list[str]:
-    """Parse a model response into pdf_output/<stem>.yaml + .meta.json.
+                   via_batch: bool = False) -> str:
+    """Parse a model response into pdf_output/<name>.yaml + .meta.json.
 
-    Returns the validation issues; raises if the response is not parseable.
+    Files are named after `component.part_number` when the model extracted a
+    usable one, falling back to the source PDF's stem - which is what keeps
+    downloads like `2d53d8d8...pdf` from producing anonymous profiles. The
+    original filename stays recoverable from meta.json's `source_file`.
+
+    Returns the stem actually written; raises if the response is not parseable.
     """
     extracted = json.loads(
         (settings.step1_dir / f"{stem}.json").read_text(encoding="utf-8")
     )
     profile, issues = parse_and_validate(response_text)
 
-    out_path = settings.output_dir / f"{stem}.yaml"
-    meta_path = settings.output_dir / f"{stem}.meta.json"
+    source_sha256 = extracted["source_sha256"]
+    part_number = _part_number_stem(profile)
+    if part_number:
+        out_stem = _resolve_out_stem(settings, part_number, source_sha256)
+    else:
+        out_stem = stem
+        print("  no usable component.part_number - keeping the source filename")
+
+    out_path = settings.output_dir / f"{out_stem}.yaml"
+    meta_path = settings.output_dir / f"{out_stem}.meta.json"
     out_path.write_text(yaml.safe_dump(profile, sort_keys=False), encoding="utf-8")
     meta = {
         "source_file": extracted["file"],
@@ -118,11 +175,29 @@ def _write_profile(settings: Settings, stem: str, response_text: str,
     print(f"Wrote {out_path}")
     print(f"Wrote {meta_path}")
 
+    if out_stem != stem:
+        print(f"  named from part_number: {stem}.pdf -> {out_stem}.yaml")
+        _note_superseded(settings, stem, out_path)
+
     if issues:
         print("\nValidation issues:")
         for issue in issues:
             print(f"- {issue}")
-    return issues
+    return out_stem
+
+
+def _note_superseded(settings: Settings, stem: str, new_path: Path) -> None:
+    """Flag - but never delete - a profile left behind under the old name."""
+    old_path = settings.output_dir / f"{stem}.yaml"
+    if not old_path.is_file():
+        return
+    try:
+        if os.path.samefile(old_path, new_path):
+            return  # case-insensitive filesystem: same file, already rewritten
+    except OSError:
+        return
+    print(f"  note: {old_path.name} is superseded by {new_path.name} "
+          "and was left in place - delete it when you are happy with the new one")
 
 
 def cmd_profile(pdf_name: str, backend: str | None = None,
@@ -154,6 +229,40 @@ def cmd_validate(profile_path: str) -> int:
         print(f"warning: {warn}")
     print("OK" if result.ok else "FAILED")
     return 0 if result.ok else 1
+
+
+def _profiled_sources(output_dir: Path) -> dict[str, str]:
+    """source_sha256 -> profile stem, read from every meta.json.
+
+    The skip check keys on this rather than on `<pdf stem>.yaml` existing:
+    profiles are named after the part number, so the output filename no longer
+    matches the input filename. Filename matching also silently depended on
+    Windows' case-insensitivity - `ads114s06b.pdf` vs `ADS114S06B.yaml` looked
+    processed here and unprocessed on Linux, resubmitting a paid extraction.
+    """
+    index: dict[str, str] = {}
+    for meta_path in output_dir.glob("*.meta.json"):
+        try:
+            data = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        digest = data.get("source_sha256")
+        if digest:
+            index[digest] = meta_path.name[: -len(".meta.json")]
+    return index
+
+
+def _already_profiled(settings: Settings, pdf_path: Path,
+                      index: dict[str, str]) -> str | None:
+    """Name of the existing profile for this PDF, or None."""
+    existing = index.get(file_sha256(pdf_path))
+    if existing:
+        return existing
+    # Imported profiles predate source hashing; fall back to the old check so
+    # this stays at least as conservative as before.
+    if (settings.output_dir / f"{pdf_path.stem}.yaml").is_file():
+        return pdf_path.stem
+    return None
 
 
 def _summary(processed: list[str], skipped: list[str], failed: list[str]) -> None:
@@ -200,9 +309,8 @@ def _collect_batch(settings: Settings, llm, batch_id: str, backend: str,
         print(f"\n-- {stem} --")
         try:
             text = first_text_block(message)
-            _write_profile(settings, stem, text, backend, model, effort,
-                           via_batch=True)
-            processed.append(stem)
+            processed.append(_write_profile(
+                settings, stem, text, backend, model, effort, via_batch=True))
         except Exception as exc:
             print(f"  ERROR: {exc}")
             failed.append(stem)
@@ -252,9 +360,15 @@ def cmd_batch(force: bool = False, backend: str | None = None,
     # Steps 1-2 are local and cost nothing, so they run for every datasheet
     # up front - a PDF with no text layer fails here rather than after a
     # batch has already been paid for.
+    profiled = _profiled_sources(settings.output_dir)
+
     for pdf_path in pdfs:
-        if (settings.output_dir / f"{pdf_path.stem}.yaml").exists() and not force:
-            skipped.append(pdf_path.name)
+        existing = None if force else _already_profiled(settings, pdf_path, profiled)
+        if existing:
+            label = pdf_path.name
+            if existing != pdf_path.stem:
+                label = f"{pdf_path.name} (profiled as {existing}.yaml)"
+            skipped.append(label)
             continue
 
         print(f"\n-- {pdf_path.name} --")
@@ -300,9 +414,9 @@ def cmd_batch(force: bool = False, backend: str | None = None,
             try:
                 response = llm.generate_yaml_profile(
                     item.system_prompt, item.user_prompt)
-                _write_profile(settings, item.stem, response, resolved_backend,
-                               settings.model_name, resolved_effort)
-                processed.append(item.stem)
+                processed.append(_write_profile(
+                    settings, item.stem, response, resolved_backend,
+                    settings.model_name, resolved_effort))
             except Exception as exc:
                 print(f"  ERROR: {exc}")
                 failed.append(item.stem)
