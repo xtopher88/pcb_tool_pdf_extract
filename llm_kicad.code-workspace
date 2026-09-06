@@ -1,0 +1,26 @@
+{
+	"folders": [
+		{
+			"path": "../../llm_kicad"
+		},
+		{
+			"path": "."
+		},
+		{
+			"path": "../pdf_input"
+		},
+		{
+			"path": "../pdf_step1"
+		},
+		{
+			"path": "../pdf_output"
+		}
+	],
+	"settings": {
+		"terminal.integrated.env.windows": {
+			"VIRTUAL_ENV": "${workspaceFolder}\\.venv",
+			"PATH": "${workspaceFolder}\\.venv\\Scripts;${env:PATH}"
+		},
+		"terminal.integrated.defaultProfile.windows": "Git Bash"
+	}
+}

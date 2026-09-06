@@ -76,6 +76,40 @@ Options:
 - `--backend openai|claude|claude-code` — LLM used in the `profile` step.
   `claude-code` drives a Claude Code session via the Agent SDK and needs no
   API key.
+- `--effort low|medium|high|xhigh|max` — how much thinking the model spends
+  per datasheet (`claude` backend only; default `high`).
+- `--sync` (batch only) — profile one datasheet at a time instead of using the
+  Batch API.
+- `--resume BATCH_ID` (batch only) — collect a previously submitted batch.
+
+## Batch runs and cost
+
+With the `claude` backend, `batch` submits every datasheet as a single
+[Message Batch](https://docs.anthropic.com/en/docs/build-with-claude/batch-processing)
+and collects the results, which costs **50% of standard rates**. Steps 1 and 2
+still run locally first, so a PDF with no text layer fails before anything is
+submitted. Use `--sync` for immediate per-datasheet results at full price; the
+`openai` and `claude-code` backends always run sequentially.
+
+Batches usually finish within an hour (24 hours maximum). The submission is
+recorded in `pdf_output/.batches/<batch_id>.json` before polling begins, so
+interrupting the poll is safe:
+
+```bash
+schematic-extract batch                              # submit + wait + write
+schematic-extract batch --resume msgbatch_01ABC...   # collect a batch later
+```
+
+Two knobs move the bill, in order of return:
+
+- **Batching** halves it, with no effect on output quality.
+- **`--effort medium`** cuts the thinking half of the output tokens. Extraction
+  against an explicit schema rarely needs `high` — try `medium`, diff the YAML
+  against a known-good profile, and keep it if the result holds.
+
+Prompt caching is deliberately not used: the reusable prefix (system prompt +
+schema) is only ~5.4K tokens and each datasheet's excerpts are unique, so there
+is nothing meaningful to reuse across runs.
 
 Configuration (managed by `schematic-extract setup`; env vars override `.env`):
 
@@ -83,6 +117,7 @@ Configuration (managed by `schematic-extract setup`; env vars override `.env`):
 |---|---|---|
 | `DATASHEET_BACKEND` | LLM backend | `openai` |
 | `DATASHEET_MODEL` | Model name | per backend |
+| `DATASHEET_EFFORT` | Thinking effort (`claude` backend only) | `high` |
 | `OPENAI_API_KEY` | for `openai` backend | — |
 | `ANTHROPIC_API_KEY` | for `claude` backend | — |
 | `PDF_WORKSPACE` | parent of the data dirs | repo parent |

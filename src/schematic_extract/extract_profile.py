@@ -82,13 +82,17 @@ def parse_yaml_response(text: str) -> dict:
     return result
 
 
-def extract_and_validate(
-    llm_client,
-    system_prompt: str,
+def prepare_user_prompt(
     datasheet_file: str,
     selected_chunks: list[Chunk],
     schema_markdown: str,
-) -> tuple[dict, list[str]]:
+) -> str:
+    """Build the user prompt, refusing datasheets with no usable text layer.
+
+    Split out from extract_and_validate so the batch path can prepare every
+    prompt up front - and fail fast on unreadable PDFs - before spending
+    anything on a submission.
+    """
     total_chars = sum(len(c.text) for c in selected_chunks)
     if not selected_chunks or total_chars < 150:
         raise ValueError(
@@ -96,13 +100,19 @@ def extract_and_validate(
             "The PDF may be image-only or contain no selectable text. "
             "Try --extractor docling (or auto)."
         )
-    user_prompt = build_user_prompt(
+    return build_user_prompt(
         datasheet_file=datasheet_file,
         selected_chunks=selected_chunks,
         schema_markdown=schema_markdown,
     )
-    response = llm_client.generate_yaml_profile(system_prompt, user_prompt)
-    profile = parse_yaml_response(response)
+
+
+def parse_and_validate(response_text: str) -> tuple[dict, list[str]]:
+    """Turn a raw model response into a validated profile plus its issue list.
+
+    Shared by the streaming and batch paths so both apply the same checks.
+    """
+    profile = parse_yaml_response(response_text)
     result = validate_profile(profile)
 
     issues = []
@@ -110,3 +120,19 @@ def extract_and_validate(
         issues.extend(result.errors)
     issues.extend(result.warnings)
     return profile, issues
+
+
+def extract_and_validate(
+    llm_client,
+    system_prompt: str,
+    datasheet_file: str,
+    selected_chunks: list[Chunk],
+    schema_markdown: str,
+) -> tuple[dict, list[str]]:
+    user_prompt = prepare_user_prompt(
+        datasheet_file=datasheet_file,
+        selected_chunks=selected_chunks,
+        schema_markdown=schema_markdown,
+    )
+    response = llm_client.generate_yaml_profile(system_prompt, user_prompt)
+    return parse_and_validate(response)

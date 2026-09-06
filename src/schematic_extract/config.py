@@ -26,6 +26,10 @@ class Settings:
       PDF_OUTPUT_DIR  component profiles + meta    (default: <workspace>/pdf_output)
 
     Chunked text (also pre-LLM) lives under <step1>/chunks/.
+
+    DATASHEET_EFFORT tunes how much thinking the model spends per datasheet
+    ("low" through "max"; default "high", the API default). It applies to the
+    'claude' backend only - the other backends have no equivalent knob.
     """
 
     repo_root: Path
@@ -38,6 +42,7 @@ class Settings:
     schema_path: Path
     backend: str  # "openai" | "claude" | "claude-code"
     model_name: str
+    effort: str  # "low" | "medium" | "high" | "xhigh" | "max" (claude backend only)
 
     @staticmethod
     def load() -> "Settings":
@@ -56,6 +61,7 @@ class Settings:
             schema_path=root / "schema" / "component_profile_schema.md",
             backend=os.getenv("DATASHEET_BACKEND", "openai"),
             model_name=os.getenv("DATASHEET_MODEL", "gpt-5.4"),
+            effort=os.getenv("DATASHEET_EFFORT", "high"),
         )
 
 

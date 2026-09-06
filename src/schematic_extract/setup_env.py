@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from .config import Settings, ensure_dirs
+from .llm_client import DEFAULT_EFFORT, EFFORT_CHOICES
 
 BACKENDS: dict[str, dict] = {
     "openai": {
@@ -16,12 +17,12 @@ BACKENDS: dict[str, dict] = {
     },
     "claude": {
         "key_var": "ANTHROPIC_API_KEY",
-        "default_model": "claude-sonnet-4-6",
+        "default_model": "claude-opus-5",
         "package": "anthropic",
     },
     "claude-code": {
         "key_var": None,
-        "default_model": "claude-sonnet-4-6",
+        "default_model": "claude-opus-5",
         "package": "claude_agent_sdk",
     },
 }
@@ -134,6 +135,8 @@ def cmd_setup(backend: str | None = None, model: str | None = None) -> None:
     info = BACKENDS[backend]
     model = model or info["default_model"]
     updates = {"DATASHEET_BACKEND": backend, "DATASHEET_MODEL": model}
+    if backend == "claude":
+        updates["DATASHEET_EFFORT"] = DEFAULT_EFFORT
 
     key_var = info["key_var"]
     if key_var:
@@ -241,6 +244,11 @@ def cmd_doctor(live: bool = False) -> int:
         fail(f"DATASHEET_BACKEND={backend!r} is not one of {list(BACKENDS)}")
         return 1
     ok(f"backend {backend}, model {settings.model_name}")
+    if backend == "claude":
+        if settings.effort in EFFORT_CHOICES:
+            ok(f"effort {settings.effort}")
+        else:
+            fail(f"DATASHEET_EFFORT={settings.effort!r} is not one of {EFFORT_CHOICES}")
 
     info = BACKENDS[backend]
     try:
