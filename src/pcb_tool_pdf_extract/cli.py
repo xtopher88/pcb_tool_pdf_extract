@@ -14,18 +14,27 @@ from .chunking import Chunk, chunk_pages, save_chunks
 from .config import Settings, ensure_dirs
 from . import batch_api
 from .extract_profile import (
+    PASSES,
+    PASS_NAMES,
+    get_pass,
     load_system_prompt,
+    recommend_passes,
+    skip_registers_reason,
+    merge_profiles,
     parse_and_validate,
+    parse_yaml_response,
     prepare_user_prompt,
-    select_relevant_chunks,
+    select_chunks,
+    select_for_pass,
 )
 from .hashing import content_sha256, file_sha256
 from .llm_client import EFFORT_CHOICES, first_text_block, make_client
 from .pdf_extract import extract_pdf_text, save_extracted_text
 from .provenance import SIDECAR_NAME, harvest, load_sidecar, sidecar_stub
+from .tables import audit
 from .validate_profile import validate_profile
 
-_EXTRACTOR_CHOICES = ["pymupdf", "docling", "auto"]
+_EXTRACTOR_CHOICES = ["pymupdf4llm", "pymupdf", "docling", "auto"]
 _BACKEND_CHOICES = ["openai", "claude", "claude-code"]
 # Written by step 1, copied into each profile's meta.json.
 _PROVENANCE_FIELDS = ("source_url", "publisher", "retrieved",
@@ -45,7 +54,7 @@ def _resolve_pdf(settings: Settings, pdf_name: str) -> Path:
     )
 
 
-def cmd_extract_text(pdf_name: str, extractor: str = "pymupdf",
+def cmd_extract_text(pdf_name: str, extractor: str = "pymupdf4llm",
                      source_url: str | None = None) -> None:
     settings = Settings.load()
     ensure_dirs(settings)
@@ -57,6 +66,16 @@ def cmd_extract_text(pdf_name: str, extractor: str = "pymupdf",
                             source_url=source_url,
                             sidecar=load_sidecar(settings.input_dir))
     save_extracted_text(data, out_path)
+
+    report = audit(data["pages"])
+    print(f"  {data['page_count']} pages, {report['table_rows']} table rows")
+    if report["suspect_rows"]:
+        # Never seen from pymupdf4llm; a non-zero count means the renderer
+        # started repeating a spanned cell across the columns it covers, which
+        # would put wrong values into profiles without any other symptom.
+        print(f"  WARNING: {len(report['suspect_rows'])} table row(s) repeat one "
+              f"value across three or more columns - check "
+              f"page(s) {sorted({r['page'] for r in report['suspect_rows']})[:8]}")
     print(f"Wrote {out_path}")
 
 
@@ -74,11 +93,16 @@ def cmd_chunk(pdf_name: str) -> None:
     print(f"Wrote {chunks_path}")
 
 
-def _prepare_request(settings: Settings, pdf_name: str) -> tuple[str, str, str]:
+def _prepare_request(settings: Settings, pdf_name: str,
+                     pass_name: str | None = None) -> tuple[str, str, str]:
     """Build the (system_prompt, user_prompt, stem) for one datasheet.
 
     Reads only local step-1 artefacts - no API call - so a batch run can
     prepare and sanity-check every prompt before spending anything.
+
+    With `pass_name`, chunks are chosen for that pass's sections rather than
+    by budget alone; the schema is narrowed to the keys the pass produces so
+    the model is not asked for sections it was not given the text for.
     """
     stem = Path(pdf_name).stem
     chunks_path = settings.chunks_dir / f"{stem}.json"
@@ -87,12 +111,71 @@ def _prepare_request(settings: Settings, pdf_name: str) -> tuple[str, str, str]:
     chunks = [Chunk(**c) for c in raw_chunks]
 
     system_prompt = load_system_prompt(settings.prompts_dir / "system.txt")
+    schema = settings.schema_path.read_text(encoding="utf-8")
+
+    if pass_name:
+        extraction_pass = get_pass(pass_name)
+        selection = select_for_pass(chunks, extraction_pass, settings.max_chars)
+        _report_selection(f"{stem} [{pass_name}]", selection)
+        _report_pass_coverage(chunks, extraction_pass, selection)
+        schema = (
+            f"{schema}\n\n"
+            f"## This extraction pass\n\n"
+            f"You are extracting only: {extraction_pass.purpose}.\n"
+            f"Emit only these top-level keys: "
+            f"{', '.join(extraction_pass.produces)}.\n"
+            f"Omit every other section - a later pass covers it. Do not guess at "
+            f"content from sections you were not given."
+        )
+    else:
+        selection = select_chunks(chunks, settings.max_chars)
+        _report_selection(stem, selection)
+
     user_prompt = prepare_user_prompt(
         datasheet_file=Path(pdf_name).name,
-        selected_chunks=select_relevant_chunks(chunks),
-        schema_markdown=settings.schema_path.read_text(encoding="utf-8"),
+        selected_chunks=selection.chunks,
+        schema_markdown=schema,
     )
     return system_prompt, user_prompt, stem
+
+
+def _report_pass_coverage(chunks, extraction_pass, selection) -> None:
+    """Say how much of the pass's own material actually fitted.
+
+    A pass that got all of its sections and one that got a fifth of them
+    produce profiles that look alike, so the difference has to be visible
+    here.
+    """
+    want = sum(len(c.text) for c in chunks if c.heading_hint in extraction_pass.hints)
+    if not want:
+        print(f"    no chunks matched this pass's sections; sending general content")
+        return
+    got = sum(len(c.text) for c in selection.chunks
+              if c.heading_hint in extraction_pass.hints)
+    pct = 100 * got // want
+    note = "" if pct == 100 else "  <- incomplete; raise DATASHEET_MAX_CHARS or split further"
+    print(f"    own sections: {got:,}/{want:,} chars = {pct}%{note}")
+
+
+def _report_selection(stem: str, selection) -> None:
+    """Say how much of the datasheet is being sent.
+
+    A truncated datasheet and a datasheet that genuinely lacks a section look
+    identical in the resulting profile, so the truncation has to be visible
+    here - it is the only place anyone can still tell the difference.
+    """
+    if selection.complete:
+        print(f"  {stem}: sending all {len(selection.chunks)} chunks "
+              f"({selection.included_chars:,} chars)")
+        return
+    dropped_sections = sorted({chunk.heading_hint for chunk in selection.dropped})
+    print(f"  {stem}: sending {len(selection.chunks)} of "
+          f"{len(selection.chunks) + len(selection.dropped)} chunks - "
+          f"{selection.coverage:.0%} of the extracted text "
+          f"({selection.included_chars:,} of {selection.total_chars:,} chars)")
+    print(f"    over the character budget; dropped lowest-priority sections: "
+          f"{', '.join(dropped_sections)}")
+    print("    raise DATASHEET_MAX_CHARS if the model's context allows it")
 
 
 # A manufacturer part number is a single token. Anything with whitespace is
@@ -139,8 +222,10 @@ def _resolve_out_stem(settings: Settings, desired: str,
 
 def _write_profile(settings: Settings, stem: str, response_text: str,
                    backend: str, model: str, effort: str,
-                   via_batch: bool = False) -> str:
-    """Parse a model response into pdf_output/<name>.yaml + .meta.json.
+                   via_batch: bool = False,
+                   passes_run: list[str] | None = None,
+                   passes_skipped: dict[str, str] | None = None) -> str:
+    """Parse a model response into pcb_tool_pdf_output/<name>.yaml + .meta.json.
 
     Files are named after `component.part_number` when the model extracted a
     usable one, falling back to the source PDF's stem - which is what keeps
@@ -177,6 +262,11 @@ def _write_profile(settings: Settings, stem: str, response_text: str,
         "effort": effort,
         "batch_api": via_batch,
         "date": date.today().isoformat(),
+        # Which passes produced this profile, and why any were left out. A
+        # profile with no register map because the part has none and one that
+        # skipped the pass are otherwise indistinguishable.
+        **({"passes_run": passes_run} if passes_run else {}),
+        **({"passes_skipped": passes_skipped} if passes_skipped else {}),
         # Carried through from step 1 - the Zone.Identifier stream it came
         # from may not exist by the time anyone reads this profile.
         **{key: extracted.get(key) for key in _PROVENANCE_FIELDS},
@@ -211,19 +301,66 @@ def _note_superseded(settings: Settings, stem: str, new_path: Path) -> None:
 
 
 def cmd_profile(pdf_name: str, backend: str | None = None,
-                effort: str | None = None) -> None:
+                effort: str | None = None,
+                passes: list[str] | str | None = None) -> None:
     settings = Settings.load()
     ensure_dirs(settings)
 
     resolved_backend = backend or settings.backend
     resolved_effort = effort or settings.effort
     print(f"  backend: {resolved_backend}")
-
-    system_prompt, user_prompt, stem = _prepare_request(settings, pdf_name)
     llm = make_client(resolved_backend, settings.model_name, effort=resolved_effort)
-    response = llm.generate_yaml_profile(system_prompt, user_prompt)
-    _write_profile(settings, stem, response, resolved_backend,
-                   settings.model_name, resolved_effort)
+
+    auto = passes == "auto"
+    if auto:
+        stem = Path(pdf_name).stem
+        chunks = [Chunk(**c) for c in json.loads(
+            (settings.chunks_dir / f"{stem}.json").read_text(encoding="utf-8"))]
+        passes = recommend_passes(chunks, settings.max_chars)
+        print(f"  passes: {', '.join(passes) if passes else 'none - datasheet fits one prompt'}")
+
+    if not passes:
+        system_prompt, user_prompt, stem = _prepare_request(settings, pdf_name)
+        response = llm.generate_yaml_profile(system_prompt, user_prompt)
+        _write_profile(settings, stem, response, resolved_backend,
+                       settings.model_name, resolved_effort)
+        return
+
+    stem = Path(pdf_name).stem
+    by_pass: dict[str, dict] = {}
+    skipped: dict[str, str] = {}
+    requested = list(passes)
+
+    for pass_name in requested:
+        # The schematic pass runs first and establishes the category, so by the
+        # time the register pass comes up we know whether a HAL covers it.
+        # An explicitly requested pass is always honoured; only `auto` skips.
+        if pass_name == "registers" and auto:
+            reason = skip_registers_reason(by_pass.get("schematic") or {})
+            if reason:
+                print(f"  pass: registers - SKIPPED ({reason})")
+                skipped[pass_name] = reason
+                continue
+
+        print(f"  pass: {pass_name} - {get_pass(pass_name).purpose}")
+        system_prompt, user_prompt, stem = _prepare_request(settings, pdf_name, pass_name)
+        response = llm.generate_yaml_profile(system_prompt, user_prompt)
+        try:
+            by_pass[pass_name] = parse_yaml_response(response)
+        except ValueError as error:
+            # One pass failing must not lose the others - they are separate
+            # requests and the rest of the profile is still worth writing.
+            print(f"    pass {pass_name} did not return usable YAML: {error}")
+
+    if not by_pass:
+        raise ValueError(f"No pass produced a usable profile for {pdf_name}")
+
+    merged, notes = merge_profiles(by_pass)
+    for note in notes:
+        print(f"  NOTE: {note}")
+    _write_profile(settings, stem, yaml.dump(merged, sort_keys=False, allow_unicode=True),
+                   resolved_backend, settings.model_name, resolved_effort,
+                   passes_run=sorted(by_pass), passes_skipped=skipped)
 
 
 def cmd_validate(profile_path: str) -> int:
@@ -381,7 +518,7 @@ def _collect_batch(settings: Settings, llm, batch_id: str, backend: str,
     model = state.get("model", settings.model_name)
 
     print(f"\nWaiting on batch {batch_id} (safe to Ctrl-C; resume with "
-          f"'schematic-extract batch --resume {batch_id}')")
+          f"'pcb_tool_pdf_extract batch --resume {batch_id}')")
     batch = batch_api.poll_until_done(llm, batch_id)
     print(f"  batch ended: succeeded={batch.request_counts.succeeded} "
           f"errored={batch.request_counts.errored}")
@@ -523,7 +660,7 @@ def cmd_batch(force: bool = False, backend: str | None = None,
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        prog="schematic-extract",
+        prog="pcb_tool_pdf_extract",
         description="Extract structured component profiles from datasheet PDFs.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -531,8 +668,9 @@ def main() -> None:
 
     p1 = sub.add_parser("extract-text", help="Step 1: PDF -> raw per-page text (pdf_step1/)")
     p1.add_argument("pdf_name")
-    p1.add_argument("--extractor", choices=_EXTRACTOR_CHOICES, default="pymupdf",
-                    help="PDF extraction backend (default: pymupdf)")
+    p1.add_argument("--extractor", choices=_EXTRACTOR_CHOICES, default="pymupdf4llm",
+                    help="PDF extraction backend (default: pymupdf4llm, which "
+                         "renders tables as markdown)")
     p1.add_argument("--source-url",
                     help="Where this PDF came from (overrides Zone.Identifier "
                          f"and {SIDECAR_NAME})")
@@ -540,10 +678,16 @@ def main() -> None:
     p2 = sub.add_parser("chunk", help="Step 2: raw text -> heading-aware chunks (pdf_step1/chunks/)")
     p2.add_argument("pdf_name")
 
-    p3 = sub.add_parser("profile", help="Step 3: chunks -> component profile YAML (pdf_output/)")
+    p3 = sub.add_parser("profile", help="Step 3: chunks -> component profile YAML (pcb_tool_pdf_output/)")
     p3.add_argument("pdf_name")
     p3.add_argument("--backend", choices=_BACKEND_CHOICES,
                     help="LLM backend (overrides DATASHEET_BACKEND env var)")
+    p3.add_argument("--passes", nargs="*", choices=(*PASS_NAMES, "auto"), default=None,
+                    metavar="PASS",
+                    help="Extract in targeted passes instead of one prompt "
+                         f"(choices: {', '.join(PASS_NAMES)}, auto; no value = auto). "
+                         "'auto' splits only when the datasheet is too large to "
+                         "send whole, which is the only case where it pays.")
     p3.add_argument("--effort", choices=EFFORT_CHOICES,
                     help="Thinking effort, claude backend only "
                          "(overrides DATASHEET_EFFORT; default high)")
@@ -552,8 +696,9 @@ def main() -> None:
     p4.add_argument("--force", action="store_true", help="Reprocess even if a profile already exists")
     p4.add_argument("--backend", choices=_BACKEND_CHOICES,
                     help="LLM backend (overrides DATASHEET_BACKEND env var)")
-    p4.add_argument("--extractor", choices=_EXTRACTOR_CHOICES, default="pymupdf",
-                    help="PDF extraction backend (default: pymupdf)")
+    p4.add_argument("--extractor", choices=_EXTRACTOR_CHOICES, default="pymupdf4llm",
+                    help="PDF extraction backend (default: pymupdf4llm, which "
+                         "renders tables as markdown)")
     p4.add_argument("--effort", choices=EFFORT_CHOICES,
                     help="Thinking effort, claude backend only "
                          "(overrides DATASHEET_EFFORT; default high)")
@@ -590,7 +735,11 @@ def main() -> None:
     elif args.cmd == "chunk":
         cmd_chunk(args.pdf_name)
     elif args.cmd == "profile":
-        cmd_profile(args.pdf_name, backend=args.backend, effort=args.effort)
+        chosen = args.passes
+        if chosen is not None and (not chosen or chosen == ["auto"]):
+            chosen = "auto"
+        cmd_profile(args.pdf_name, backend=args.backend, effort=args.effort,
+                    passes=chosen)
     elif args.cmd == "batch":
         cmd_batch(force=args.force, backend=args.backend,
                   extractor=args.extractor, effort=args.effort,

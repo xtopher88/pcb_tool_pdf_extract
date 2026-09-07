@@ -7,7 +7,7 @@ profiles as results arrive.
 
 A batch can take up to 24 hours, so the submission is recorded in
 `<output_dir>/.batches/<batch_id>.json` before polling starts. If polling is
-interrupted the work is not lost - `schematic-extract batch --resume <id>`
+interrupted the work is not lost - `pcb_tool_pdf_extract batch --resume <id>`
 picks the same batch back up. Results stay retrievable for 29 days.
 """
 

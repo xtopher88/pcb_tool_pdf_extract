@@ -106,7 +106,7 @@ def cmd_setup(backend: str | None = None, model: str | None = None) -> None:
     settings = Settings.load()
     env_path = settings.repo_root / ".env"
 
-    print("schematic-extract setup")
+    print("pcb_tool_pdf_extract setup")
     print(f"  config file: {env_path}")
     print("  (keys are stored only in this file; it is gitignored and never printed)\n")
 
@@ -165,8 +165,8 @@ def cmd_setup(backend: str | None = None, model: str | None = None) -> None:
     prefix = {"ok": "[ ok ]", "warn": "[warn]", "fail": "[FAIL]"}[status]
     print(f"{prefix} {message}")
 
-    print("\nNext: schematic-extract doctor          (check the installation)")
-    print("      schematic-extract doctor --live   (also test the LLM connection)")
+    print("\nNext: pcb_tool_pdf_extract doctor          (check the installation)")
+    print("      pcb_tool_pdf_extract doctor --live   (also test the LLM connection)")
 
 
 def cmd_doctor(live: bool = False) -> int:
@@ -186,7 +186,7 @@ def cmd_doctor(live: bool = False) -> int:
         counts["fail"] += 1
         print(f"  [FAIL] {msg}")
 
-    print("schematic-extract doctor\n")
+    print("pcb_tool_pdf_extract doctor\n")
 
     # -- Python & required packages ------------------------------------
     if sys.version_info >= (3, 11):
@@ -237,7 +237,7 @@ def cmd_doctor(live: bool = False) -> int:
 
     # -- Backend configuration -----------------------------------------
     if not env_path.exists():
-        warn(f"no .env file yet - using defaults; run 'schematic-extract setup'")
+        warn(f"no .env file yet - using defaults; run 'pcb_tool_pdf_extract setup'")
 
     backend = settings.backend
     if backend not in BACKENDS:
@@ -265,7 +265,7 @@ def cmd_doctor(live: bool = False) -> int:
             ok(f"{key_var} set from {source} ({mask_key(value)})")
         else:
             (fail if live else warn)(
-                f"{key_var} not set - run 'schematic-extract setup'")
+                f"{key_var} not set - run 'pcb_tool_pdf_extract setup'")
     else:
         ok("backend needs no API key (uses your Claude Code session)")
 

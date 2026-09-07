@@ -6,9 +6,11 @@ import os
 
 from dotenv import load_dotenv
 
+from .extract_profile import DEFAULT_MAX_CHARS
+
 
 def _repo_root() -> Path:
-    # src/schematic_extract/config.py -> repo root is two levels above the package
+    # src/pcb_tool_pdf_extract/config.py -> repo root is two levels above the package
     return Path(__file__).resolve().parents[2]
 
 
@@ -23,9 +25,13 @@ class Settings:
                       alongside its data directories)
       PDF_INPUT_DIR   source PDFs                  (default: <workspace>/pdf_input)
       PDF_STEP1_DIR   raw extracted text, pre-LLM  (default: <workspace>/pdf_step1)
-      PDF_OUTPUT_DIR  component profiles + meta    (default: <workspace>/pdf_output)
+      PDF_OUTPUT_DIR  component profiles + meta    (default: <workspace>/pcb_tool_pdf_output)
 
     Chunked text (also pre-LLM) lives under <step1>/chunks/.
+
+    DATASHEET_MAX_CHARS caps the datasheet text placed in one prompt. The
+    default suits a 200K-token context; raise it for a larger one. Selection
+    is additive, so this is the only thing that ever drops a chunk.
 
     DATASHEET_EFFORT tunes how much thinking the model spends per datasheet
     ("low" through "max"; default "high", the API default). It applies to the
@@ -43,6 +49,7 @@ class Settings:
     backend: str  # "openai" | "claude" | "claude-code"
     model_name: str
     effort: str  # "low" | "medium" | "high" | "xhigh" | "max" (claude backend only)
+    max_chars: int  # datasheet characters allowed in one prompt
 
     @staticmethod
     def load() -> "Settings":
@@ -56,12 +63,13 @@ class Settings:
             input_dir=Path(os.getenv("PDF_INPUT_DIR", str(workspace / "pdf_input"))),
             step1_dir=step1_dir,
             chunks_dir=step1_dir / "chunks",
-            output_dir=Path(os.getenv("PDF_OUTPUT_DIR", str(workspace / "pdf_output"))),
+            output_dir=Path(os.getenv("PDF_OUTPUT_DIR", str(workspace / "pcb_tool_pdf_output"))),
             prompts_dir=root / "prompts",
             schema_path=root / "schema" / "component_profile_schema.md",
             backend=os.getenv("DATASHEET_BACKEND", "openai"),
             model_name=os.getenv("DATASHEET_MODEL", "gpt-5.4"),
             effort=os.getenv("DATASHEET_EFFORT", "high"),
+            max_chars=int(os.getenv("DATASHEET_MAX_CHARS", str(DEFAULT_MAX_CHARS))),
         )
 
 

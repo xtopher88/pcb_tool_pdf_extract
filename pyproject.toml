@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "schematic-extract"
+name = "pcb_tool_pdf_extract"
 version = "0.1.0"
 description = "Extract structured component profiles from IC datasheet PDFs for schematic review and firmware planning."
 readme = "README.md"
@@ -11,6 +11,10 @@ license = { text = "MIT" }
 requires-python = ">=3.11"
 dependencies = [
   "PyMuPDF",
+  # Renders each page as markdown with tables in place. Pulls in
+  # pymupdf-layout and onnxruntime; like PyMuPDF itself it is AGPL-3.0
+  # or Artifex commercial.
+  "pymupdf4llm",
   "PyYAML",
   "python-dotenv",
 ]
@@ -23,7 +27,7 @@ docling = ["docling>=2.0"]
 all = ["openai", "anthropic", "claude-agent-sdk", "anyio", "docling>=2.0"]
 
 [project.scripts]
-schematic-extract = "schematic_extract.cli:main"
+pcb_tool_pdf_extract = "pcb_tool_pdf_extract.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -1,19 +1,16 @@
 {
 	"folders": [
 		{
-			"path": "../../llm_kicad"
+			"path": "../pcb_tool_schematic"
 		},
 		{
 			"path": "."
 		},
 		{
-			"path": "../pdf_input"
+			"path": "../pcb_tool_pdf_output"
 		},
 		{
-			"path": "../pdf_step1"
-		},
-		{
-			"path": "../pdf_output"
+			"path": "../pcb_board_kiln_controller"
 		},
 		{
 			"path": "../clean_pull"

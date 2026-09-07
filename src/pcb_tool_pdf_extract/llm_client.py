@@ -63,7 +63,7 @@ class OpenAILLMClient:
     def __post_init__(self) -> None:
         if OpenAI is None:
             raise RuntimeError(
-                "openai is not installed. Run: pip install schematic-extract[openai]"
+                "openai is not installed. Run: pip install pcb_tool_pdf_extract[openai]"
             )
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
