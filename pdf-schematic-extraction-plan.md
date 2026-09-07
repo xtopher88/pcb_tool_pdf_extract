@@ -246,6 +246,9 @@ dataset of extraction outputs.
 
 **Not started**
 
+Actionable open items, with evidence, are in [`TODO.md`](TODO.md) - that is the
+list to pick up from. The summary below is the design-level remainder.
+
 - Data repo (`pcb_tool_pdf_extract-data`) creation and the `publish` CLI command
 - CI (golden-fixture diffs in the code repo; hash re-derivation in the data
   repo)
